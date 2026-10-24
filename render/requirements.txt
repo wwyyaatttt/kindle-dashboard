@@ -3,3 +3,4 @@ requests==2.34.2
 icalendar==7.3.0
 recurring-ical-events==3.8.2
 astral==3.2
+fonttools==4.67.0

@@ -5,24 +5,22 @@ on:
     - cron: "*/10 * * * *"
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-  actions: write
+permissions: {}
 
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
-  render:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment:
-      name: github-pages
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v7
         with:
@@ -40,23 +38,52 @@ jobs:
           DASH_PLACE: ${{ secrets.DASH_PLACE }}
           NWS_GRID: ${{ secrets.NWS_GRID }}
           NWS_STATION: ${{ secrets.NWS_STATION }}
+        run: cd render && python render.py "$RUNNER_TEMP/out"
+
+      # Pages artifacts in a public repo can be downloaded by any GitHub user, so only
+      # encrypted files are published. The Kindle holds the same key (key.txt).
+      # -md sha256 without -pbkdf2 keeps the format readable by the Kindle's OpenSSL 1.0.1g.
+      - name: Encrypt
+        env:
+          DASH_KEY: ${{ secrets.DASH_KEY }}
           DASH_TOKEN: ${{ secrets.DASH_TOKEN }}
         run: |
-          test -n "$DASH_TOKEN"
+          test -n "$DASH_KEY" && test -n "$DASH_TOKEN"
           mkdir -p "site/$DASH_TOKEN"
           touch site/.nojekyll site/index.html
-          cd render && python render.py "../site/$DASH_TOKEN"
+          for f in dashboard.gz:dashboard.bin meta.txt:meta.bin; do
+            openssl enc -aes-256-cbc -md sha256 -salt -pass env:DASH_KEY \
+              -in "$RUNNER_TEMP/out/${f%%:*}" -out "site/$DASH_TOKEN/${f##*:}" 2>/dev/null
+          done
+          ls -la "site/$DASH_TOKEN"
 
       - uses: actions/upload-pages-artifact@v5
         with:
           path: site
+          retention-days: 1
 
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+    steps:
       - uses: actions/deploy-pages@v5
 
-      # Public repos get scheduled workflows switched off after 60 days without commits;
-      # re-enabling through the API keeps the timer from running out.
-      - name: Keep schedule alive
-        if: github.event_name == 'schedule'
-        env:
+  # Public repos get scheduled workflows switched off after 60 days without commits;
+  # re-enabling through the API keeps the timer from running out.
+  keepalive:
+    needs: [build, deploy]
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/render.yml/enable" || true
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/render.yml/enable" || echo "::warning::keepalive enable call failed"

@@ -13,6 +13,9 @@ MARGIN = 36
 # The server-rendered dashboard leaves it blank.
 CLOCK_Y = 72
 CLOCK_H = 182
+# The Kindle can overlay a status banner (stale data, low battery) on the footer band.
+BANNER_H = 50
+BANNER_Y = H - BANNER_H
 
 INK = 0
 SECONDARY = 0x66

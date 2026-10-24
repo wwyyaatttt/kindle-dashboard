@@ -13,3 +13,7 @@ kindle/extensions/dashboard/diag.txt
 kindle/extensions/dashboard/url.txt
 # Third-party binary (FBInk, GPLv3) copied from a KOReader "kindle" release
 kindle/extensions/dashboard/bin/fbink
+kindle/extensions/dashboard/banner/
+kindle/extensions/dashboard/cache/
+# Decryption key for the published dashboard
+kindle/extensions/dashboard/key.txt
