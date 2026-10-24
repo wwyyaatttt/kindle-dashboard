@@ -1,0 +1,50 @@
+"""Shared layout constants and drawing helpers for the dashboard and the clock sprites."""
+
+from pathlib import Path
+
+from PIL import Image, ImageDraw, ImageFont
+
+# Kindle Paperwhite (5th gen) panel: 758x1024, 16 gray levels.
+W, H = 758, 1024
+MARGIN = 36
+
+# The Kindle draws the time itself, once a minute, into this band.
+# The server-rendered dashboard leaves it blank.
+CLOCK_Y = 72
+CLOCK_H = 182
+
+INK = 0
+SECONDARY = 0x66
+TERTIARY = 0x99
+CARD = 0xEE
+HAIRLINE = 0xCC
+PAPER = 0xFF
+
+FONT_DIR = Path(__file__).parent / "fonts"
+
+
+def font(name: str, size: int) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(str(FONT_DIR / f"{name}.ttf"), size)
+
+
+def new_canvas(w: int = W, h: int = H) -> tuple[Image.Image, ImageDraw.ImageDraw]:
+    img = Image.new("L", (w, h), PAPER)
+    return img, ImageDraw.Draw(img)
+
+
+def to_eink(img: Image.Image) -> Image.Image:
+    """Snap to the panel's 16 gray levels so antialiasing renders predictably."""
+    return img.point(lambda v: round(v / 17) * 17)
+
+
+def text_w(draw: ImageDraw.ImageDraw, s: str, f: ImageFont.FreeTypeFont) -> int:
+    return int(draw.textlength(s, font=f))
+
+
+def fit(draw: ImageDraw.ImageDraw, s: str, f: ImageFont.FreeTypeFont, max_w: int) -> str:
+    """Truncate with an ellipsis so the string fits in max_w pixels."""
+    if text_w(draw, s, f) <= max_w:
+        return s
+    while s and text_w(draw, s + "…", f) > max_w:
+        s = s[:-1]
+    return s.rstrip() + "…"

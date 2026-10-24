@@ -1,0 +1,62 @@
+name: render
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  actions: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: render/requirements.txt
+
+      - run: pip install -r render/requirements.txt
+
+      - name: Render
+        env:
+          GCAL_ICS: ${{ secrets.GCAL_ICS }}
+          DASH_LAT: ${{ secrets.DASH_LAT }}
+          DASH_LON: ${{ secrets.DASH_LON }}
+          DASH_PLACE: ${{ secrets.DASH_PLACE }}
+          NWS_GRID: ${{ secrets.NWS_GRID }}
+          NWS_STATION: ${{ secrets.NWS_STATION }}
+          DASH_TOKEN: ${{ secrets.DASH_TOKEN }}
+        run: |
+          test -n "$DASH_TOKEN"
+          mkdir -p "site/$DASH_TOKEN"
+          touch site/.nojekyll site/index.html
+          cd render && python render.py "../site/$DASH_TOKEN"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - uses: actions/deploy-pages@v4
+
+      # Public repos get scheduled workflows switched off after 60 days without commits;
+      # re-enabling through the API keeps the timer from running out.
+      - name: Keep schedule alive
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/render.yml/enable" || true

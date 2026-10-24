@@ -1,0 +1,26 @@
+{
+	"items": [
+	{
+		"name": "Dashboard",
+		"priority": 0,
+		"items": [
+		{
+			"name": "Start dashboard",
+			"action": "./bin/start.sh",
+			"exitmenu": true,
+			"refresh": false,
+			"status": false,
+			"internal": "status Starting dashboard..."
+		},
+		{
+			"name": "Run diagnostics",
+			"action": "./bin/diag.sh",
+			"exitmenu": false,
+			"refresh": false,
+			"status": false,
+			"internal": "status Running diagnostics..."
+		}
+		]
+	}
+	]
+}
