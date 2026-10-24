@@ -25,7 +25,7 @@ from astral import LocationInfo
 from astral.sun import sun
 from icalendar import Calendar
 
-from common import (CARD, CLOCK_H, CLOCK_Y, H, HAIRLINE, INK, MARGIN, SECONDARY, TERTIARY, W,
+from common import (CARD, CLOCK_H, CLOCK_Y, H, HAIRLINE, INK, MARGIN, SECONDARY, W,
                     fit, font, new_canvas, save_fb_gz, text_w, to_eink)
 
 TZ = ZoneInfo("America/Chicago")
@@ -34,6 +34,11 @@ PLACE = os.environ.get("DASH_PLACE", "New Orleans")
 GRID = os.environ.get("NWS_GRID", "LIX/68,88")
 STATION = os.environ.get("NWS_STATION", "KMSY")
 NWS = "https://api.weather.gov"
+
+# The calendar card and footer use darker grays than the weather card; lighter ones wash out on e-ink.
+CAL_LABEL = 0x33
+CAL_MUTED = 0x55
+FOOT = 0x44
 UA = {"User-Agent": "kindle-dashboard (github.com/wwyyaatttt/kindle-dashboard)",
       "Accept": "application/geo+json"}
 
@@ -57,7 +62,7 @@ F = {
     "ev_time": font("Inter-Medium", 21),
     "ev_title": font("Inter-SemiBold", 26),
     "empty": font("Inter-Medium", 24),
-    "foot": font("Inter-Regular", 18),
+    "foot": font("Inter-Medium", 19),
 }
 
 
@@ -255,7 +260,7 @@ def draw_calendar(d, events: list[Event] | None, now: datetime, top: int, bottom
     L, R = MARGIN + 30, W - MARGIN - 30
     y = top + 24
     if events is None:
-        d.text((L, y), "Calendar unavailable", font=F["empty"], fill=SECONDARY)
+        d.text((L, y), "Calendar unavailable", font=F["empty"], fill=CAL_MUTED)
         return
 
     row_h, max_y = 43, bottom - 12
@@ -263,19 +268,19 @@ def draw_calendar(d, events: list[Event] | None, now: datetime, top: int, bottom
         day = now.date() + timedelta(days=offset)
         if y + 34 + row_h > max_y:
             break
-        d.text((L, y), heading, font=F["label"], fill=SECONDARY)
+        d.text((L, y), heading, font=F["label"], fill=CAL_LABEL)
         if offset:
-            d.text((R, y), day.strftime("%A"), font=F["label"], fill=TERTIARY, anchor="ra")
+            d.text((R, y), day.strftime("%A"), font=F["label"], fill=CAL_MUTED, anchor="ra")
         y += 34
         day_events = [e for e in events if e.day == day]
         if not day_events:
-            d.text((L, y + 4), "No more events" if offset == 0 else "No events", font=F["empty"], fill=TERTIARY)
+            d.text((L, y + 4), "No more events" if offset == 0 else "No events", font=F["empty"], fill=CAL_MUTED)
             y += row_h + 10
             continue
         for i, ev in enumerate(day_events):
             remaining = len(day_events) - i
             if y + row_h > max_y or (remaining > 1 and y + 2 * row_h > max_y):
-                d.text((L + 18, y + 6), f"+{remaining} more", font=F["ev_time"], fill=SECONDARY)
+                d.text((L + 18, y + 6), f"+{remaining} more", font=F["ev_time"], fill=CAL_LABEL)
                 y += row_h
                 break
             if ev.start is None:
@@ -285,7 +290,7 @@ def draw_calendar(d, events: list[Event] | None, now: datetime, top: int, bottom
             else:
                 when = fmt_time(ev.start)
             d.rounded_rectangle((L, y + 5, L + 5, y + row_h - 9), radius=3, fill=INK)
-            d.text((L + 18, y + 8), when, font=F["ev_time"], fill=SECONDARY)
+            d.text((L + 18, y + 8), when, font=F["ev_time"], fill=CAL_LABEL)
             d.text((L + 150, y + 4), fit(d, ev.title, F["ev_title"], R - L - 150), font=F["ev_title"], fill=INK)
             y += row_h
         y += 10
@@ -304,7 +309,7 @@ def render(now: datetime, wx: Weather | None, events: list[Event] | None):
 
     s = sun(LocationInfo(latitude=LAT, longitude=LON).observer, date=now.date(), tzinfo=TZ)
     foot = f"Sunrise {fmt_time(s['sunrise'])}   ·   Sunset {fmt_time(s['sunset'])}   ·   Updated {fmt_time(now)}"
-    d.text((W // 2, H - 36), foot, font=F["foot"], fill=TERTIARY, anchor="ma")
+    d.text((W // 2, H - 36), foot, font=F["foot"], fill=FOOT, anchor="ma")
     return to_eink(img)
 
 
