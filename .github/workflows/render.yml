@@ -22,9 +22,9 @@ jobs:
     environment:
       name: github-pages
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -47,11 +47,11 @@ jobs:
           touch site/.nojekyll site/index.html
           cd render && python render.py "../site/$DASH_TOKEN"
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
-      - uses: actions/deploy-pages@v4
+      - uses: actions/deploy-pages@v5
 
       # Public repos get scheduled workflows switched off after 60 days without commits;
       # re-enabling through the API keeps the timer from running out.
