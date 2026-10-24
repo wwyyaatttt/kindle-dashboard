@@ -26,7 +26,7 @@ from astral.sun import sun
 from icalendar import Calendar
 
 from common import (CARD, CLOCK_H, CLOCK_Y, H, HAIRLINE, INK, MARGIN, SECONDARY, TERTIARY, W,
-                    fit, font, new_canvas, text_w, to_eink)
+                    fit, font, new_canvas, save_fb_gz, text_w, to_eink)
 
 TZ = ZoneInfo("America/Chicago")
 LAT, LON = float(os.environ.get("DASH_LAT", "29.9511")), float(os.environ.get("DASH_LON", "-90.0715"))
@@ -332,7 +332,9 @@ def main() -> None:
     else:
         events = []
 
-    render(now, wx, events).save(out / "dashboard.png", optimize=True)
+    img = render(now, wx, events)
+    img.save(out / "dashboard.png", optimize=True)
+    save_fb_gz(img, out / "dashboard.gz")
     # Plain key=value; the Kindle parses these as numbers, never executes them.
     offset = int(now.utcoffset().total_seconds())
     (out / "meta.txt").write_text(f"generated={int(now.timestamp())}\nutc_offset={offset}\n")

@@ -1,14 +1,15 @@
 """Pre-renders every 12-hour time (1:00 through 12:59) as a PNG the Kindle can blit.
 
 The Kindle has no good font renderer, so it draws the clock by picking
-clock/HHMM.png (HH = 01..12, as `date +%I` would print it) once a minute.
+clock/HHMM.gz (HH = 01..12, as `date +%I` would print it) once a minute and
+copying its raw framebuffer rows into the clock band.
 Run once; the output ships inside the KUAL extension.
 """
 
 import sys
 from pathlib import Path
 
-from common import CLOCK_H, INK, W, font, new_canvas, to_eink
+from common import CLOCK_H, INK, W, font, new_canvas, save_fb_gz, to_eink
 
 TIME_FONT = font("InterDisplay-SemiBold", 188)
 
@@ -27,7 +28,9 @@ def main(out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for h in range(1, 13):
         for m in range(60):
-            render_time(f"{h}:{m:02d}").save(out_dir / f"{h:02d}{m:02d}.png", optimize=True)
+            img = render_time(f"{h}:{m:02d}")
+            img.save(out_dir / f"{h:02d}{m:02d}.png", optimize=True)
+            save_fb_gz(img, out_dir / f"{h:02d}{m:02d}.gz")
     print(f"wrote 720 sprites to {out_dir}")
 
 

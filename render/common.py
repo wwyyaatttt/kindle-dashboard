@@ -1,5 +1,6 @@
 """Shared layout constants and drawing helpers for the dashboard and the clock sprites."""
 
+import gzip
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -35,6 +36,17 @@ def new_canvas(w: int = W, h: int = H) -> tuple[Image.Image, ImageDraw.ImageDraw
 def to_eink(img: Image.Image) -> Image.Image:
     """Snap to the panel's 16 gray levels so antialiasing renders predictably."""
     return img.point(lambda v: round(v / 17) * 17)
+
+
+# The framebuffer is 8-bit gray, 0 = black, with 768-byte rows (758 visible pixels + padding).
+FB_STRIDE = 768
+
+
+def save_fb_gz(img: Image.Image, path: Path) -> None:
+    """Write raw framebuffer rows, gzipped, so the Kindle can dd them straight onto the screen."""
+    padded = Image.new("L", (FB_STRIDE, img.height), PAPER)
+    padded.paste(img, (0, 0))
+    path.write_bytes(gzip.compress(padded.tobytes(), compresslevel=9, mtime=0))
 
 
 def text_w(draw: ImageDraw.ImageDraw, s: str, f: ImageFont.FreeTypeFont) -> int:
