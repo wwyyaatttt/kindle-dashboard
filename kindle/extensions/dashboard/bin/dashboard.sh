@@ -11,6 +11,8 @@
 DIR=${DASH_DIR:-/mnt/us/extensions/dashboard}   # overridable for testing off-device
 STATE=${DASH_STATE:-/tmp/dashboard}
 FB=${DASH_FB:-/dev/fb0}
+DD_OPTS=
+[ -f "$FB" ] && DD_OPTS=conv=notrunc   # only for a file stand-in; BusyBox 1.17 dd may not know conv=
 LOG=$STATE/dashboard.log
 STRIDE=768
 FRAME_BYTES=786432          # 1024 rows * 768
@@ -138,7 +140,7 @@ sync_clock() {
 # ---- drawing ----
 blit() {   # blit FILE.gz ROW: copy raw rows into the framebuffer without refreshing
 	gunzip -c "$1" > "$STATE/blit.raw" 2>/dev/null &&
-	dd if="$STATE/blit.raw" of="$FB" conv=notrunc bs=$STRIDE seek="$2" 2>/dev/null
+	dd if="$STATE/blit.raw" of="$FB" $DD_OPTS bs=$STRIDE seek="$2" 2>/dev/null || log "dd to framebuffer failed ($1)"
 }
 refresh() {   # refresh full|partial|TOP HEIGHT
 	case "$1" in
@@ -156,14 +158,14 @@ draw_footer() {   # banner, or the dashboard's own footer rows when there's noth
 	if [ -n "$BANNER" ]; then
 		blit "$STATE/banner/$BANNER.gz" $BANNER_Y
 	elif [ -f "$STATE/dashboard.raw" ]; then
-		dd if="$STATE/dashboard.raw" of="$FB" conv=notrunc bs=$STRIDE skip=$BANNER_Y seek=$BANNER_Y count=$BANNER_H 2>/dev/null
+		dd if="$STATE/dashboard.raw" of="$FB" $DD_OPTS bs=$STRIDE skip=$BANNER_Y seek=$BANNER_Y count=$BANNER_H 2>/dev/null || log "dd to framebuffer failed (footer)"
 	else
 		blit "$STATE/banner/blank.gz" $BANNER_Y
 	fi
 }
 compose() {   # compose NOW full|partial: whole screen in the framebuffer, then one refresh
 	if [ -f "$STATE/dashboard.raw" ]; then
-		dd if="$STATE/dashboard.raw" of="$FB" conv=notrunc bs=$STRIDE 2>/dev/null
+		dd if="$STATE/dashboard.raw" of="$FB" $DD_OPTS bs=$STRIDE 2>/dev/null || log "dd to framebuffer failed (dashboard)"
 	else
 		"$FBINK" -q -k -b >> "$LOG" 2>&1
 	fi

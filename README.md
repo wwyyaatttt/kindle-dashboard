@@ -51,8 +51,12 @@ protects the content.
 
 ## Operations
 
-- GitHub runs `*/10` schedules late or skips them under load. The Kindle shows the stale banner after 45 minutes
-  without a new render.
+- GitHub runs scheduled workflows late (often by hours) or skips them, so the 10-minute cadence comes from an
+  external scheduler: a cron-job.org job POSTs every 10 minutes to
+  `https://api.github.com/repos/<user>/<repo>/actions/workflows/render.yml/dispatches` with body `{"ref":"main"}` and
+  headers `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28` and
+  `Authorization: Bearer <fine-grained token>` (this repo only, Actions: read and write). GitHub answers 204.
+  The workflow's own hourly schedule is a fallback. The Kindle shows the stale banner after 45 minutes without a new render.
 - Public repos get scheduled workflows disabled after 60 days without commits. The `keepalive` job re-enables the
   workflow on every scheduled run; if GitHub disables it anyway, re-enable it from the Actions tab.
 - To rotate the key or path: set the new secret(s), run the workflow, then update `key.txt` / `url.txt` on the Kindle.
