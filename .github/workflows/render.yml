@@ -48,7 +48,10 @@ jobs:
           DASH_KEY: ${{ secrets.DASH_KEY }}
           DASH_TOKEN: ${{ secrets.DASH_TOKEN }}
         run: |
-          test -n "$DASH_KEY" && test -n "$DASH_TOKEN"
+          # Separate checks: under 'bash -e' a failure early in an && list would not stop the step,
+          # and openssl happily encrypts with an empty passphrase.
+          [ "${#DASH_KEY}" -ge 32 ] || { echo "::error::DASH_KEY secret is missing or shorter than 32 characters"; exit 1; }
+          [ -n "$DASH_TOKEN" ] || { echo "::error::DASH_TOKEN secret is missing"; exit 1; }
           mkdir -p "site/$DASH_TOKEN"
           touch site/.nojekyll site/index.html
           for f in dashboard.gz:dashboard.bin meta.txt:meta.bin; do

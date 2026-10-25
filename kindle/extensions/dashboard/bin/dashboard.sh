@@ -64,12 +64,18 @@ done
 rm -rf "$STATE/clock" "$STATE/banner"
 mkdir -p "$STATE/clock" "$STATE/banner"
 cp "$DIR"/clock/*.gz "$STATE/clock/" && cp "$DIR"/banner/*.gz "$STATE/banner/" || fail_preflight "clock or banner files missing"
-BASE=$(head -n 1 "$DIR/url.txt" 2>/dev/null | tr -d '\r ')
-cp "$DIR/key.txt" "$STATE/key.txt" 2>/dev/null
-if [ -z "$BASE" ] || [ ! -s "$STATE/key.txt" ]; then
-	log "url.txt or key.txt missing: showing the clock only"
-	BASE=
-fi
+# url.txt and key.txt are re-read on every fetch, so a rotated key or path applies without a restart.
+# The key is reduced to its hex digits so a Windows-edited key.txt (CRLF, BOM) still works.
+load_config() {   # skipped while /mnt/us is USB-mounted (keeps the last values)
+	[ -f "$DIR/url.txt" ] || return 0
+	BASE=$(head -n 1 "$DIR/url.txt" 2>/dev/null | tr -d '\r ')
+	head -n 1 "$DIR/key.txt" 2>/dev/null | tr -cd '0-9a-fA-F' > "$STATE/key.txt"
+	if [ -z "$BASE" ] || [ ! -s "$STATE/key.txt" ]; then BASE=; fi
+	return 0
+}
+BASE=
+load_config
+[ -n "$BASE" ] || log "url.txt or key.txt missing: showing the clock only"
 
 # ---- time ----
 days_from_civil() {   # y m d -> days since 1970-01-01 (proleptic Gregorian)
@@ -108,15 +114,20 @@ month_number() {
 sync_clock() {
 	set -- $(grep -i '^date:' "$STATE/hdr" | tail -n 1 | tr -d '\r')   # Date: Sat, 24 Oct 2026 22:43:30 GMT
 	[ $# -ge 6 ] || return
+	# Validate every field before any arithmetic: an ash arithmetic error would kill the loop.
 	m=$(month_number "$4"); [ -n "$m" ] || return
+	case "$3" in [1-9]|[0-3][0-9]) ;; *) return;; esac
+	case "$5" in 20[0-9][0-9]) ;; *) return;; esac
+	case "$6" in [0-2][0-9]:[0-5][0-9]:[0-6][0-9]) ;; *) return;; esac
 	t=$6
 	hh=${t%%:*}; rest=${t#*:}; mm=${rest%%:*}; ss=${rest#*:}
-	case "$3$5$hh$mm$ss" in *[!0-9]*) return;; esac
-	server=$(( $(days_from_civil "$5" "$m" "${3#0}") * 86400 + ${hh#0} * 3600 + ${mm#0} * 60 + ${ss#0} ))
-	[ $((server - GEN)) -gt -21600 ] && [ $((server - GEN)) -lt 21600 ] || return
+	day=${3#0}
+	server=$(( $(days_from_civil "$5" "$m" "$day") * 86400 + (1$hh - 100) * 3600 + (1$mm - 100) * 60 + (1$ss - 100) ))
+	# Renders are minutes apart; a Date far from the render time is a stale cache or a forgery.
+	[ $((server - GEN)) -gt -300 ] && [ $((server - GEN)) -lt 7200 ] || return
 	skew=$((server - $(date -u +%s)))
 	if [ "$skew" -gt 30 ] || [ "$skew" -lt -30 ]; then
-		if date -u -s "$(printf '%04d-%02d-%02d %s' "$5" "$m" "${3#0}" "$t")" >/dev/null 2>&1; then
+		if date -u -s "$(printf '%04d-%02d-%02d %s' "$5" "$m" "$day" "$t")" >/dev/null 2>&1; then
 			hwclock -u -w >/dev/null 2>&1
 			log "clock corrected by ${skew}s"
 			batt_checked=0; last_full=0
@@ -170,10 +181,13 @@ load_meta() {   # load_meta FILE: sets GEN from a validated generated= line
 }
 
 fails=0
-fetch_failed() {
+net_fails=0
+fetch_failed() {   # fetch_failed REASON [net]: only network failures count toward a Wi-Fi restart
 	fails=$((fails + 1))
 	log "fetch failed ($fails in a row): $1"
-	if [ $((fails % 3)) -eq 0 ]; then
+	[ "$2" = net ] || return 1
+	net_fails=$((net_fails + 1))
+	if [ $((net_fails % 3)) -eq 0 ]; then
 		log "restarting Wi-Fi"
 		lipc-set-prop com.lab126.cmd wirelessEnable 0 >> "$LOG" 2>&1
 		sleep 3
@@ -183,14 +197,23 @@ fetch_failed() {
 }
 
 # fetch: returns 0 when a new, valid dashboard replaced the old one.
+curl_failed() {   # curl exit 22 is an HTTP error (the server answered); anything else is the network
+	if [ "$2" -eq 22 ]; then fetch_failed "$1: HTTP error"; else fetch_failed "$1: curl exit $2" net; fi
+}
 fetch() {
+	load_config
+	[ -n "$BASE" ] || return 1
 	curl -k -L --max-redirs 3 -s -f --connect-timeout 10 -m 30 -o "$STATE/new.bin" "$BASE/dashboard.bin" \
-		|| { fetch_failed "dashboard curl exit $?"; return 1; }
+		|| { curl_failed dashboard $?; return 1; }
 	curl -k -L --max-redirs 3 -s -f --connect-timeout 10 -m 15 -D "$STATE/hdr" -o "$STATE/meta.bin" "$BASE/meta.bin" \
-		|| { fetch_failed "meta curl exit $?"; return 1; }
+		|| { curl_failed meta $?; return 1; }
+	net_fails=0
 	decrypt "$STATE/meta.bin" "$STATE/meta.new" || { fetch_failed "meta.bin did not decrypt (wrong key?)"; return 1; }
 	old_gen=$GEN
 	load_meta "$STATE/meta.new" || { fetch_failed "meta has no generated="; return 1; }
+	if [ "$GEN" -lt "$old_gen" ]; then   # never go back to an older render (replayed files)
+		GEN=$old_gen; fetch_failed "render is older than the one on screen"; return 1
+	fi
 	decrypt "$STATE/new.bin" "$STATE/new.gz" && gunzip -c "$STATE/new.gz" > "$STATE/new.raw" 2>/dev/null \
 		|| { GEN=$old_gen; fetch_failed "dashboard.bin did not decrypt/unzip"; return 1; }
 	if [ "$(($(wc -c < "$STATE/new.raw")))" -ne $FRAME_BYTES ]; then
@@ -218,7 +241,11 @@ check_battery() {
 
 pick_banner() {
 	stale=
-	[ -n "$BASE" ] && [ "$GEN" -gt 0 ] && [ $(($1 - GEN)) -gt $STALE_AFTER ] && stale=1
+	if [ -n "$BASE" ] && [ "$GEN" -gt 0 ]; then
+		[ $(($1 - GEN)) -gt $STALE_AFTER ] && stale=1
+		# a render from an earlier local day (yesterday's date and TODAY list), 15 min after midnight
+		[ $(( ($1 + OFFSET) / 86400 )) -ne $(( (GEN + OFFSET) / 86400 )) ] && [ $(( ($1 + OFFSET) % 86400 )) -gt 900 ] && stale=1
+	fi
 	if [ -n "$BASE" ] && [ "$GEN" -eq 0 ]; then BANNER=nodata
 	elif [ -n "$stale" ] && [ -n "$BATT_LOW" ]; then BANNER=stale_battery
 	elif [ -n "$stale" ]; then BANNER=stale
@@ -229,7 +256,8 @@ pick_banner() {
 
 # ---- power button: exit to the normal Kindle UI ----
 start_power_watch() {
-	[ -f "$STATE/watch.pid" ] && kill "$(cat "$STATE/watch.pid")" 2>/dev/null
+	old=$(cat "$STATE/watch.pid" 2>/dev/null)   # only if that pid is still our lipc-wait-event
+	if [ -n "$old" ] && grep -q lipc-wait-event "/proc/$old/cmdline" 2>/dev/null; then kill "$old" 2>/dev/null; fi
 	rm -f "$STATE/power.fifo"
 	if ! have lipc-wait-event || ! mkfifo "$STATE/power.fifo" 2>/dev/null; then
 		log "power button exit unavailable"; return
@@ -240,6 +268,7 @@ start_power_watch() {
 		read -r _ < "$STATE/power.fifo" || exit 0
 		log "power button pressed: exiting to the Kindle UI"
 		lipc-set-prop com.lab126.powerd preventScreenSaver 0 >> "$LOG" 2>&1
+		lipc-set-prop com.lab126.cmd wirelessEnable 1 >> "$LOG" 2>&1   # in case a Wi-Fi restart was mid-way
 		kill "$MAIN_PID" 2>/dev/null
 		sleep 1
 		rm -f "$STATE/pid"

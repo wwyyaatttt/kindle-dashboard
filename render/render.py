@@ -35,16 +35,26 @@ from common import (CARD, CLOCK_H, CLOCK_Y, FONT_DIR, H, HAIRLINE, INK, MARGIN, 
                     fit, font, new_canvas, save_fb_gz, text_w, to_eink)
 
 
-def env(name: str, default: str) -> str:
-    """Empty or missing secrets fall back to the default instead of crashing."""
-    return os.environ.get(name, "").strip() or default
+SAMPLE = "--sample" in sys.argv
+# --sample previews use a public stand-in location; real runs must have every location secret.
+SAMPLE_LOCATION = {"DASH_LAT": "41.8781", "DASH_LON": "-87.6298", "DASH_PLACE": "Chicago",
+                   "NWS_GRID": "LOT/76,73", "NWS_STATION": "KMDW"}
 
 
-TZ = ZoneInfo("America/Chicago")
-LAT, LON = float(env("DASH_LAT", "29.9511")), float(env("DASH_LON", "-90.0715"))
-PLACE = env("DASH_PLACE", "New Orleans")
-GRID = env("NWS_GRID", "LIX/68,88")
-STATION = env("NWS_STATION", "KMSY")
+def env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if SAMPLE:
+        return value or SAMPLE_LOCATION[name]
+    if not value:
+        sys.exit(f"missing secret {name}: refusing to render a dashboard for the wrong place")
+    return value
+
+
+TZ = ZoneInfo("America/Chicago")   # the Kindle's clock assumes US Central too (dashboard.sh)
+LAT, LON = float(env("DASH_LAT")), float(env("DASH_LON"))
+PLACE = env("DASH_PLACE")
+GRID = env("NWS_GRID")
+STATION = env("NWS_STATION")
 NWS = "https://api.weather.gov"
 OBSERVER = LocationInfo(latitude=LAT, longitude=LON).observer
 
@@ -120,6 +130,8 @@ def icon_for(text: str, daytime: bool) -> str:
         return "tornado"
     if "thunder" in t:
         return "thunderstorm"
+    if "fog" in t and "rain" not in t and "drizzle" not in t:
+        return "foggy"   # before the freezing check: "Freezing Fog" is fog
     if any(k in t for k in ("wintry", "sleet", "freezing", "ice pellets", "mix")):
         return "weather_mix"
     if any(k in t for k in ("snow", "flurr", "blizzard")):
@@ -138,7 +150,15 @@ def icon_for(text: str, daytime: bool) -> str:
         return "cloud"
     if "wind" in t or "breezy" in t or "blustery" in t:
         return "air"
-    return "sunny" if daytime else "clear_night"
+    if any(k in t for k in ("sunny", "clear", "fair", "hot", "cold")):
+        return "sunny" if daytime else "clear_night"
+    return "cloud"   # an unrecognized phrase shouldn't claim sunshine
+
+
+# Shorter wordings tried, in order, before shrinking the font or truncating.
+COND_SHORTER = (("Showers And Thunderstorms", "Storms"), ("Thunderstorms", "Storms"),
+                ("Rain Showers", "Showers"), (" And ", " & "), ("Slight Chance", "Chance"),
+                ("Chance Storms", "Chance of Storms"), ("Chance Showers", "Chance of Showers"))
 
 
 @dataclass
@@ -156,13 +176,18 @@ class Weather:
     icon: str
     high: int | None
     low: int | None
-    night: bool          # first daily period is tonight: show tonight's low and tomorrow's high
+    night: bool          # first daily period is a night: show its low first, then the next day's high
     hours: list[Hour]
 
 
 def fetch_weather(now: datetime) -> Weather:
     hourly = get(f"{NWS}/gridpoints/{GRID}/forecast/hourly")["properties"]["periods"]
-    daily = get(f"{NWS}/gridpoints/{GRID}/forecast")["properties"]["periods"]
+    try:   # the daily forecast only supplies H/L; don't lose the whole card without it
+        daily = [p for p in get(f"{NWS}/gridpoints/{GRID}/forecast")["properties"]["periods"]
+                 if datetime.fromisoformat(p["endTime"]) > now]
+    except (requests.RequestException, KeyError, TypeError, ValueError) as e:
+        print(f"daily forecast failed: {type(e).__name__}", file=sys.stderr)
+        daily = []
 
     hours = []
     for p in hourly:
@@ -204,14 +229,27 @@ class Event:
     kind: int = 2            # 0 all-day, 1 continues from an earlier day, 2 timed
 
 
-def _occurrences(cal: Calendar, start: datetime, end: datetime):
+def _occurrences(cal: Calendar, start: datetime, end: datetime) -> list:
     try:
-        yield from recurring_ical_events.of(cal).between(start, end)
+        return list(recurring_ical_events.of(cal).between(start, end))
     except Exception as e:
-        # One malformed VEVENT shouldn't blank the whole calendar: fall back to plain events.
-        print(f"calendar recurrence expansion failed ({type(e).__name__}); using non-recurring events", file=sys.stderr)
-        for ev in cal.walk("VEVENT"):
-            yield ev
+        print(f"calendar expansion failed ({type(e).__name__}); expanding events one series at a time", file=sys.stderr)
+    # One malformed VEVENT shouldn't blank the calendar: expand each series (a UID with its
+    # overrides) on its own and skip only the ones that fail.
+    zones = list(cal.walk("VTIMEZONE"))
+    series = {}
+    for ev in cal.walk("VEVENT"):
+        series.setdefault(str(ev.get("UID", id(ev))), []).append(ev)
+    out = []
+    for components in series.values():
+        mini = Calendar()
+        for c in zones + components:
+            mini.add_component(c)
+        try:
+            out += recurring_ical_events.of(mini).between(start, end)
+        except Exception as e:
+            print(f"skipped a malformed event series ({type(e).__name__})", file=sys.stderr)
+    return out
 
 
 def events_from_calendar(cal: Calendar, now: datetime) -> list[Event]:
@@ -245,9 +283,9 @@ def events_from_calendar(cal: Calendar, now: datetime) -> list[Event]:
                         day_start = datetime.combine(d, time.min, TZ)
                         if e >= day_start + timedelta(days=1):
                             out.append(Event(d, None, None, title, 0))       # spans the whole day
-                        elif e > day_start + timedelta(hours=6):
+                        elif d == today or e > day_start + timedelta(hours=6):
                             out.append(Event(d, s, e, title, 1))           # "Until 10:00 AM"
-                        # an overnight event ending before 6 AM isn't worth a row the next day
+                        # an overnight event ending before 6 AM isn't worth a row under TOMORROW
                     else:
                         out.append(Event(d, s, e, title, 2))
             else:
@@ -261,7 +299,8 @@ def events_from_calendar(cal: Calendar, now: datetime) -> list[Event]:
     return out
 
 
-def fetch_events(urls: list[str], now: datetime) -> list[Event] | None:
+def fetch_events(urls: list[str], now: datetime) -> tuple[list[Event] | None, int]:
+    """Events from every calendar that loaded, and how many calendars failed (None if all did)."""
     events, failures = [], 0
     for i, url in enumerate(urls, 1):
         if url.startswith("webcal://"):
@@ -274,7 +313,7 @@ def fetch_events(urls: list[str], now: datetime) -> list[Event] | None:
             failures += 1
             print(f"calendar {i} failed: {type(e).__name__}", file=sys.stderr)  # never log the secret URL
     if failures == len(urls):
-        return None
+        return None, failures
 
     # The same invite often appears in two shared calendars.
     seen, unique = set(), []
@@ -284,7 +323,7 @@ def fetch_events(urls: list[str], now: datetime) -> list[Event] | None:
             seen.add(key)
             unique.append(ev)
     unique.sort(key=lambda ev: (ev.day, ev.kind, ev.start or now, ev.title))
-    return unique
+    return unique, failures
 
 
 def sample_events(now: datetime) -> list[Event]:
@@ -363,16 +402,27 @@ def draw_weather(img, d, wx: Weather | None, now: datetime, top: int, bottom: in
         return
 
     d.text((L, top + 26), PLACE.upper(), font=F["label"], fill=WX_MUTED)
-    d.text((L - 6, top + 50), f"{wx.temp}°", font=F["temp"], fill=INK)
+    temp = f"{wx.temp}°"
+    d.text((L - 6, top + 50), temp, font=F["temp"], fill=INK)
 
     draw_icon(d, wx.icon, R, top + 26, 92, anchor="ra")
+    # The condition may use the width the big temperature leaves free.
+    room = R - (L - 6 + text_w(d, temp, F["temp"]) + 24)
+    cond, cond_font = wx.condition, font("Inter-SemiBold", COND_SIZES[0])
+    for old, new in COND_SHORTER:
+        if text_w(d, cond, cond_font) <= room:
+            break
+        cond = cond.replace(old, new)
     for size in COND_SIZES:
         cond_font = font("Inter-SemiBold", size)
-        if text_w(d, wx.condition, cond_font) <= 330:
+        if text_w(d, cond, cond_font) <= room:
             break
-    d.text((R, top + 132), fit(d, wx.condition, cond_font, 330), font=cond_font, fill=INK, anchor="ra")
+    d.text((R, top + 132), fit(d, cond, cond_font, room), font=cond_font, fill=INK, anchor="ra")
     if wx.high is not None and wx.low is not None:
-        hilo = f"L:{wx.low}°   Tomorrow H:{wx.high}°" if wx.night else f"H:{wx.high}°   L:{wx.low}°"
+        if wx.night:   # after midnight the coming high is today's; in the evening it's tomorrow's
+            hilo = f"L:{wx.low}°   {'Today' if now.hour < 12 else 'Tomorrow'} H:{wx.high}°"
+        else:
+            hilo = f"H:{wx.high}°   L:{wx.low}°"
         d.text((R, top + 168), hilo, font=F["hilo"], fill=WX_MUTED, anchor="ra")
 
     phase, name = moon_phase(now.date())
@@ -382,7 +432,10 @@ def draw_weather(img, d, wx: Weather | None, now: datetime, top: int, bottom: in
     line_y = top + 206
     d.line((L, line_y, R, line_y), fill=HAIRLINE, width=2)
 
-    picks = [wx.hours[0]] + [h for h in wx.hours[1:] if h.at.hour % 2 == wx.hours[0].at.hour % 2][:5]
+    # Every two hours of elapsed time, not by clock hour, so the DST fall-back night has no repeats.
+    first = wx.hours[0].at
+    picks = [wx.hours[0]] + [h for h in wx.hours[1:]
+                             if round((h.at.timestamp() - first.timestamp()) / 3600) % 2 == 0][:5]
     col = (R - L) / len(picks)
     for i, h in enumerate(picks):
         cx = int(L + col * i + col / 2)
@@ -408,7 +461,7 @@ def day_rows(day_events: list[Event], now: datetime, today: bool) -> list[tuple[
     return rows
 
 
-def draw_calendar(d, events: list[Event] | None, now: datetime, top: int, bottom: int):
+def draw_calendar(d, events: list[Event] | None, now: datetime, top: int, bottom: int, failed: int = 0):
     card(d, top, bottom)
     L, R = MARGIN + 30, W - MARGIN - 30
     y = top + 24
@@ -417,12 +470,18 @@ def draw_calendar(d, events: list[Event] | None, now: datetime, top: int, bottom
         return
 
     row_h, head_h, gap, max_y = 43, 34, 10, bottom - 12
+    if failed:   # partial results shouldn't look complete
+        max_y -= 28
+        note = f"{failed} calendar{'s' if failed > 1 else ''} couldn’t be loaded"
+        d.text((R, max_y + 2), note, font=F["ev_time"], fill=CAL_MUTED, anchor="ra")
     days = [(now.date() + timedelta(days=o), o == 0) for o in (0, 1)]
     rows = {day: day_rows([e for e in events if e.day == day], now, today) for day, today in days}
+    # Keep room for TOMORROW so a busy today never hides it: its first event, plus a "+N more" row if needed.
+    tomorrow_rows = len(rows[days[1][0]])
+    tomorrow_need = head_h + gap + row_h * min(max(tomorrow_rows, 1), 2)
     for day, today in days:
         heading = "TODAY" if today else "TOMORROW"
-        # Keep room for TOMORROW's heading and first row so a busy today never hides it.
-        limit = max_y - (head_h + row_h + gap if today else 0)
+        limit = max_y - (tomorrow_need if today else 0)
         if y + head_h + row_h > max_y:
             break
         d.text((L, y), heading, font=F["label"], fill=CAL_LABEL)
@@ -449,7 +508,7 @@ def draw_calendar(d, events: list[Event] | None, now: datetime, top: int, bottom
         y += gap
 
 
-def render(now: datetime, wx: Weather | None, events: list[Event] | None) -> Image.Image:
+def render(now: datetime, wx: Weather | None, events: list[Event] | None, failed: int = 0) -> Image.Image:
     img, d = new_canvas()
 
     d.text((W // 2, 34), now.strftime("%A, %B ") + str(now.day), font=F["date"], fill=INK, anchor="ma")
@@ -458,7 +517,7 @@ def render(now: datetime, wx: Weather | None, events: list[Event] | None) -> Ima
     weather_top = CLOCK_Y + CLOCK_H + 20
     draw_weather(img, d, wx, now, weather_top, weather_top + 348)
     cal_top = weather_top + 348 + 20
-    draw_calendar(d, events, now, cal_top, H - 50)
+    draw_calendar(d, events, now, cal_top, H - 50, failed)
 
     s = sun(OBSERVER, date=now.date(), tzinfo=TZ)
     foot = f"Sunrise {fmt_time(s['sunrise'])}   ·   Sunset {fmt_time(s['sunset'])}   ·   Updated {fmt_time(now)}"
@@ -479,7 +538,6 @@ def next_offset_change(now: datetime) -> tuple[int, int]:
 
 def main() -> None:
     out = Path(sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else "out")
-    sample = "--sample" in sys.argv
     out.mkdir(parents=True, exist_ok=True)
     now = datetime.now(TZ)
 
@@ -490,14 +548,15 @@ def main() -> None:
         wx = None
 
     urls = [u.strip() for u in os.environ.get("GCAL_ICS", "").replace(",", "\n").splitlines() if u.strip()]
-    if sample:
+    failed = 0
+    if SAMPLE:
         events = sample_events(now)
     elif urls:
-        events = fetch_events(urls, now)
+        events, failed = fetch_events(urls, now)
     else:
-        events = []
+        sys.exit("missing secret GCAL_ICS")
 
-    img = render(now, wx, events)
+    img = render(now, wx, events, failed)
     img.save(out / "dashboard.png", optimize=True)
     save_fb_gz(img, out / "dashboard.gz")
     # Plain key=value; the Kindle parses these as numbers, never executes them.

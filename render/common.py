@@ -57,9 +57,14 @@ def text_w(draw: ImageDraw.ImageDraw, s: str, f: ImageFont.FreeTypeFont) -> int:
 
 
 def fit(draw: ImageDraw.ImageDraw, s: str, f: ImageFont.FreeTypeFont, max_w: int) -> str:
-    """Truncate with an ellipsis so the string fits in max_w pixels."""
+    """Truncate with an ellipsis so the string fits in max_w pixels (binary search: titles can be huge)."""
     if text_w(draw, s, f) <= max_w:
         return s
-    while s and text_w(draw, s + "…", f) > max_w:
-        s = s[:-1]
-    return s.rstrip() + "…"
+    lo, hi = 0, len(s)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if text_w(draw, s[:mid].rstrip() + "…", f) <= max_w:
+            lo = mid
+        else:
+            hi = mid - 1
+    return s[:lo].rstrip() + "…"

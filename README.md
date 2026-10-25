@@ -11,8 +11,8 @@ events from Google Calendar.
 - **`render/render.py`** draws a 758×1024, 16-level-gray image (date, weather card with moon phase, calendar card)
   as raw framebuffer rows (`dashboard.gz`) plus `meta.txt` (render time). A GitHub Action runs it every 10 minutes,
   **encrypts both files** (AES-256-CBC, key in the `DASH_KEY` secret) and publishes them to GitHub Pages.
-  Pages artifacts in a public repo can be downloaded by any GitHub user, so nothing readable is ever published;
-  the `DASH_TOKEN` path only keeps the URL out of sight.
+  Pages artifacts in a public repo can be downloaded by any GitHub user, and they show the `DASH_TOKEN` folder name,
+  so the path is not a secret in practice. The encryption is what keeps the content private.
 - **The clock is drawn on the Kindle.** `render/make_clock.py` pre-renders all 720 times (tabular digits, so
   only changed digits move) and the status banners. The Kindle works out US Central time and DST itself.
 - **`kindle/extensions/dashboard`** is a KUAL extension. *Start dashboard* stops the Kindle UI, disables the
@@ -26,12 +26,15 @@ events from Google Calendar.
 | Secret | Example |
 |---|---|
 | `GCAL_ICS` | Google Calendar "secret address in iCal format" (several allowed, one per line) |
-| `DASH_LAT`, `DASH_LON` | `29.95`, `-90.07` |
+| `DASH_LAT`, `DASH_LON` | decimal degrees, e.g. `41.88`, `-87.63` |
 | `DASH_PLACE` | label on the weather card |
-| `NWS_GRID` | from `https://api.weather.gov/points/LAT,LON` → `gridId/gridX,gridY`, e.g. `LIX/68,88` |
-| `NWS_STATION` | nearest observation station, e.g. `KMSY` |
+| `NWS_GRID` | from `https://api.weather.gov/points/LAT,LON` → `gridId/gridX,gridY`, e.g. `LOT/76,73` |
+| `NWS_STATION` | a station from `https://api.weather.gov/gridpoints/<grid>/stations`, e.g. `KMDW` |
 | `DASH_TOKEN` | random path segment: files live at `https://<user>.github.io/<repo>/<DASH_TOKEN>/` |
-| `DASH_KEY` | encryption passphrase (`openssl rand -hex 32`); the same value goes in the Kindle's `key.txt` |
+| `DASH_KEY` | encryption passphrase, hex only (`openssl rand -hex 32`); the same value goes in the Kindle's `key.txt` |
+
+The render fails (and nothing is deployed) if any of these is missing. The clock and the renderer assume US Central
+time. `python render/render.py out --sample` renders a preview with a public stand-in location and sample events.
 
 ## Installing on the Kindle
 
@@ -53,3 +56,4 @@ protects the content.
 - Public repos get scheduled workflows disabled after 60 days without commits. The `keepalive` job re-enables the
   workflow on every scheduled run; if GitHub disables it anyway, re-enable it from the Actions tab.
 - To rotate the key or path: set the new secret(s), run the workflow, then update `key.txt` / `url.txt` on the Kindle.
+  The running dashboard re-reads both on every fetch; until they match, it shows the stale banner.
