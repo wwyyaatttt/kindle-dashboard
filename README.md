@@ -43,7 +43,9 @@ time. `python render/render.py out --sample` renders a preview with a public sta
    `kindle/extensions/dashboard/bin/`. That build has no image support; the dashboard only uses it to refresh.
 3. Put the base URL (`https://<user>.github.io/<repo>/<DASH_TOKEN>`) in `kindle/extensions/dashboard/url.txt`
    and the `DASH_KEY` value in `kindle/extensions/dashboard/key.txt`.
-4. Copy `kindle/extensions/dashboard` to `/mnt/us/extensions/` and launch it from KUAL.
+4. Copy `kindle/extensions/dashboard` to `/mnt/us/extensions/` and launch it from KUAL, or copy
+   `kindle/scriptlets/*.sh` to `/mnt/us/documents/` to get "Dashboard - Start" / "Dashboard - Run diagnostics"
+   library entries (needs the scriptlet support from KindleModding's jb.sh / Universal Hotfix; no KUAL signing).
 
 *Run diagnostics* in the same KUAL menu writes `diag.txt` (tools, OpenSSL round trip, power properties, network).
 The Kindle's 2015 CA bundle can't verify modern certificates, so it fetches with `curl -k`; the encryption is what
