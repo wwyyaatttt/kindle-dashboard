@@ -63,10 +63,13 @@ jobs:
           done
           ls -la "site/$DASH_TOKEN"
 
-      - uses: actions/upload-pages-artifact@v5
+      - id: upload
+        uses: actions/upload-pages-artifact@v5
         with:
           path: site
           retention-days: 1
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact_id }}
 
   deploy:
     needs: build
@@ -78,7 +81,35 @@ jobs:
     environment:
       name: github-pages
     steps:
-      - uses: actions/deploy-pages@v5
+      # Not actions/deploy-pages: it labels every deployment with the commit SHA, and Pages
+      # treats a repeat label as "already live" and publishes nothing (seen 2026-11-08: twelve
+      # hours of green deploys with no change). A unique label per run avoids that.
+      - uses: actions/github-script@v9
+        env:
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+        with:
+          script: |
+            const { owner, repo } = context.repo
+            const oidc_token = await core.getIDToken()
+            const { data: dep } = await github.request('POST /repos/{owner}/{repo}/pages/deployments', {
+              owner, repo,
+              artifact_id: Number(process.env.ARTIFACT_ID),
+              pages_build_version: `${context.sha}-${context.runId}-${context.runAttempt}`,
+              oidc_token,
+            })
+            core.info(`deployment ${dep.id} created, waiting for it to go live`)
+            const sleep = ms => new Promise(r => setTimeout(r, ms))
+            for (let i = 0; i < 60; i++) {
+              await sleep(5000)
+              const { data: s } = await github.request('GET /repos/{owner}/{repo}/pages/deployments/{id}', { owner, repo, id: dep.id })
+              core.info(`status: ${s.status}`)
+              if (s.status === 'succeed') return
+              if (['deployment_failed', 'deployment_content_failed', 'deployment_attempt_error', 'deployment_lost', 'deployment_cancelled'].includes(s.status)) {
+                core.setFailed(`Pages deployment ended with status ${s.status}`)
+                return
+              }
+            }
+            core.setFailed('Pages deployment did not finish within 5 minutes')
 
   # Public repos get scheduled workflows switched off after 60 days without commits;
   # re-enabling through the API keeps the timer from running out.
