@@ -19,11 +19,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: read
+      contents: write   # to push the deploy-marker commit below
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      # Pages identifies a deployment by a commit SHA. Deploying the same SHA every 10 minutes
+      # left the site stuck on a 12-hour-old render while every deploy reported success
+      # (2026-11-08); a new SHA cleared it at once. So each run deploys under its own commit:
+      # main's tree with a fresh message, force-pushed to a side branch main never sees.
+      - name: Marker commit for this deployment
+        id: marker
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(git -c user.name=render -c user.email=render@users.noreply.github.com \
+                commit-tree "$GITHUB_SHA^{tree}" -p "$GITHUB_SHA" -m "render $GITHUB_RUN_ID")
+          git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$sha:refs/heads/deploy-marker"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v7
         with:
@@ -70,6 +84,7 @@ jobs:
           retention-days: 1
     outputs:
       artifact_id: ${{ steps.upload.outputs.artifact_id }}
+      marker_sha: ${{ steps.marker.outputs.sha }}
 
   deploy:
     needs: build
@@ -81,12 +96,12 @@ jobs:
     environment:
       name: github-pages
     steps:
-      # Not actions/deploy-pages: it labels every deployment with the commit SHA, and Pages
-      # treats a repeat label as "already live" and publishes nothing (seen 2026-11-08: twelve
-      # hours of green deploys with no change). A unique label per run avoids that.
+      # Not actions/deploy-pages: it always deploys under GITHUB_SHA, which is what got stuck.
+      # Same API call, but under this run's marker commit (an existing SHA, or Pages says 404).
       - uses: actions/github-script@v9
         env:
           ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          MARKER_SHA: ${{ needs.build.outputs.marker_sha }}
         with:
           script: |
             const { owner, repo } = context.repo
@@ -94,7 +109,7 @@ jobs:
             const { data: dep } = await github.request('POST /repos/{owner}/{repo}/pages/deployments', {
               owner, repo,
               artifact_id: Number(process.env.ARTIFACT_ID),
-              pages_build_version: `${context.sha}-${context.runId}-${context.runAttempt}`,
+              pages_build_version: process.env.MARKER_SHA,
               oidc_token,
             })
             core.info(`deployment ${dep.id} created, waiting for it to go live`)
