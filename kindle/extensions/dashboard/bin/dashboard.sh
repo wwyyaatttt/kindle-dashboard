@@ -5,7 +5,8 @@
 #  - hourly: full-flash redraw to clear e-ink ghosting
 #  - footer banner when the data is stale, the battery is low, or nothing has arrived yet
 # Images are raw framebuffer rows (8-bit gray, 768-byte stride), dd'd onto /dev/fb0.
-# Press the power button to exit back to the normal Kindle UI.
+# Press the power button to exit back to the normal Kindle UI (or create a file named "stop"
+# in this extension's folder; it is checked once a minute).
 #
 # Everything runs from /tmp/dashboard: /mnt/us disappears while the Kindle is plugged into a computer.
 DIR=${DASH_DIR:-/mnt/us/extensions/dashboard}   # overridable for testing off-device
@@ -34,9 +35,13 @@ have() {   # BusyBox 1.17 has no 'command -v', and 'which' may be missing too
 	for d in $(echo "$PATH" | tr ':' ' '); do [ -x "$d/$1" ] && return 0; done
 	return 1
 }
-rotate_log() {
-	[ -f "$LOG" ] && [ "$(($(wc -c < "$LOG")))" -gt 200000 ] && mv "$LOG" "$LOG.old"
-	[ -d "$DIR/bin" ] && cp "$LOG" "$DIR/dashboard.log" 2>/dev/null
+rotate_log() {   # mirror the log to /mnt/us (when mounted) before any rotation, so no history is lost
+	[ -d "$DIR/bin" ] && [ -f "$LOG" ] && cp "$LOG" "$DIR/dashboard.log" 2>/dev/null
+	if [ -f "$LOG" ] && [ "$(($(wc -c < "$LOG")))" -gt 200000 ]; then
+		mv "$LOG" "$LOG.old"
+		[ -d "$DIR/bin" ] && cp "$LOG.old" "$DIR/dashboard.log.old" 2>/dev/null
+	fi
+	return 0
 }
 
 # Single instance (/tmp is tmpfs, so a pid file never survives a reboot).
@@ -49,20 +54,29 @@ rotate_log
 log "starting (pid $$)"
 
 # ---- preflight: check everything before touching the UI ----
+FBINK=
 fail_preflight() {
 	log "cannot start: $1"
-	eips 0 3 "Dashboard: $1" >/dev/null 2>&1
+	[ -d "$DIR" ] && echo "$(date -u '+%Y-%m-%d %H:%M:%S') $1" > "$DIR/last_error.txt" 2>/dev/null
+	if [ -n "$FBINK" ]; then "$FBINK" -q -y 3 "Dashboard: $1" >/dev/null 2>&1; else eips 0 3 "Dashboard: $1" >/dev/null 2>&1; fi
 	rm -f "$STATE/pid"
 	rotate_log
 	exit 1
 }
-cp "$DIR/bin/fbink" "$STATE/fbink" 2>/dev/null && chmod +x "$STATE/fbink" && "$STATE/fbink" -q -e >/dev/null 2>&1 \
+cp "$DIR/bin/fbink" "$STATE/fbink" 2>/dev/null && chmod +x "$STATE/fbink" && "$STATE/fbink" -q -e > "$STATE/fbink.info" 2>&1 \
 	|| fail_preflight "fbink missing or broken"
 FBINK=$STATE/fbink
+# The raw rows we dd assume a 768-byte stride; a different panel would draw a sheared image.
+line_length=$(tr ';' '\n' < "$STATE/fbink.info" | sed -n 's/^lineLength=//p' | head -n 1)
+case "$line_length" in
+	''|"$STRIDE") ;;
+	*) fail_preflight "unexpected framebuffer stride $line_length" ;;
+esac
 for tool in gunzip openssl curl dd lipc-set-prop; do
 	have "$tool" || fail_preflight "$tool not found"
 done
 [ -w "$FB" ] || fail_preflight "framebuffer not writable"
+rm -f "$DIR/last_error.txt" 2>/dev/null
 rm -rf "$STATE/clock" "$STATE/banner"
 mkdir -p "$STATE/clock" "$STATE/banner"
 cp "$DIR"/clock/*.gz "$STATE/clock/" && cp "$DIR"/banner/*.gz "$STATE/banner/" || fail_preflight "clock or banner files missing"
@@ -139,8 +153,8 @@ sync_clock() {
 
 # ---- drawing ----
 blit() {   # blit FILE.gz ROW: copy raw rows into the framebuffer without refreshing
-	gunzip -c "$1" > "$STATE/blit.raw" 2>/dev/null &&
-	dd if="$STATE/blit.raw" of="$FB" $DD_OPTS bs=$STRIDE seek="$2" 2>/dev/null || log "dd to framebuffer failed ($1)"
+	gunzip -c "$1" > "$STATE/blit.raw" 2>/dev/null || { log "blit: cannot unpack $1"; return 1; }
+	dd if="$STATE/blit.raw" of="$FB" $DD_OPTS bs=$STRIDE seek="$2" 2>/dev/null || log "blit: dd to framebuffer failed ($1)"
 }
 refresh() {   # refresh full|partial|TOP HEIGHT
 	case "$1" in
@@ -158,14 +172,14 @@ draw_footer() {   # banner, or the dashboard's own footer rows when there's noth
 	if [ -n "$BANNER" ]; then
 		blit "$STATE/banner/$BANNER.gz" $BANNER_Y
 	elif [ -f "$STATE/dashboard.raw" ]; then
-		dd if="$STATE/dashboard.raw" of="$FB" $DD_OPTS bs=$STRIDE skip=$BANNER_Y seek=$BANNER_Y count=$BANNER_H 2>/dev/null || log "dd to framebuffer failed (footer)"
+		dd if="$STATE/dashboard.raw" of="$FB" $DD_OPTS bs=$STRIDE skip=$BANNER_Y seek=$BANNER_Y count=$BANNER_H 2>/dev/null || log "footer: dd to framebuffer failed"
 	else
 		blit "$STATE/banner/blank.gz" $BANNER_Y
 	fi
 }
 compose() {   # compose NOW full|partial: whole screen in the framebuffer, then one refresh
 	if [ -f "$STATE/dashboard.raw" ]; then
-		dd if="$STATE/dashboard.raw" of="$FB" $DD_OPTS bs=$STRIDE 2>/dev/null || log "dd to framebuffer failed (dashboard)"
+		dd if="$STATE/dashboard.raw" of="$FB" $DD_OPTS bs=$STRIDE 2>/dev/null || log "compose: dd to framebuffer failed"
 	else
 		"$FBINK" -q -k -b >> "$LOG" 2>&1
 	fi
@@ -202,13 +216,17 @@ fetch_failed() {   # fetch_failed REASON [net]: only network failures count towa
 curl_failed() {   # curl exit 22 is an HTTP error (the server answered); anything else is the network
 	if [ "$2" -eq 22 ]; then fetch_failed "$1: HTTP error"; else fetch_failed "$1: curl exit $2" net; fi
 }
+CURL="curl -k -L --max-redirs 3 -s -f --connect-timeout 10"
 fetch() {
 	load_config
 	[ -n "$BASE" ] || return 1
-	curl -k -L --max-redirs 3 -s -f --connect-timeout 10 -m 30 -o "$STATE/new.bin" "$BASE/dashboard.bin" \
-		|| { curl_failed dashboard $?; return 1; }
-	curl -k -L --max-redirs 3 -s -f --connect-timeout 10 -m 15 -D "$STATE/hdr" -o "$STATE/meta.bin" "$BASE/meta.bin" \
+	# meta first, then the image: the two are cached separately at the CDN, and a new timestamp
+	# paired with the previous image is worse than the other way round. Size caps keep a captive
+	# portal from filling tmpfs.
+	$CURL -m 15 --max-filesize 65536 -D "$STATE/hdr" -o "$STATE/meta.bin" "$BASE/meta.bin" \
 		|| { curl_failed meta $?; return 1; }
+	$CURL -m 30 --max-filesize 1500000 -o "$STATE/new.bin" "$BASE/dashboard.bin" \
+		|| { curl_failed dashboard $?; return 1; }
 	net_fails=0
 	decrypt "$STATE/meta.bin" "$STATE/meta.new" || { fetch_failed "meta.bin did not decrypt (wrong key?)"; return 1; }
 	old_gen=$GEN
@@ -223,13 +241,13 @@ fetch() {
 	fi
 	fails=0
 	sync_clock
-	if [ -d "$DIR/bin" ]; then   # keep the last good render for the next start (skipped while USB-mounted)
-		mkdir -p "$DIR/cache" && cp "$STATE/new.gz" "$DIR/cache/dashboard.gz" && cp "$STATE/meta.new" "$DIR/cache/meta.txt"
-	fi
 	if [ -f "$STATE/dashboard.raw" ] && cmp -s "$STATE/new.raw" "$STATE/dashboard.raw"; then
 		return 1
 	fi
 	mv "$STATE/new.raw" "$STATE/dashboard.raw"
+	if [ -d "$DIR/bin" ]; then   # keep the last good render for the next start (skipped while USB-mounted)
+		mkdir -p "$DIR/cache" && cp "$STATE/new.gz" "$DIR/cache/dashboard.gz" && cp "$STATE/meta.new" "$DIR/cache/meta.txt"
+	fi
 	return 0
 }
 
@@ -256,27 +274,45 @@ pick_banner() {
 	fi
 }
 
-# ---- power button: exit to the normal Kindle UI ----
+# ---- exits: power button, or a file named "stop" in the extension folder ----
+restore_ui() {   # bring the normal Kindle UI back
+	lipc-set-prop com.lab126.powerd preventScreenSaver 0 >> "$LOG" 2>&1
+	lipc-set-prop com.lab126.cmd wirelessEnable 1 >> "$LOG" 2>&1   # in case a Wi-Fi restart was mid-way
+	rm -f "$STATE/pid"
+	rotate_log
+	start lab126_gui >> "$LOG" 2>&1
+}
+kill_watcher() {
+	w=$(cat "$STATE/watch.pid" 2>/dev/null)   # only if that pid is still our lipc-wait-event
+	if [ -n "$w" ] && grep -q lipc-wait-event "/proc/$w/cmdline" 2>/dev/null; then kill "$w" 2>/dev/null; fi
+}
 start_power_watch() {
-	old=$(cat "$STATE/watch.pid" 2>/dev/null)   # only if that pid is still our lipc-wait-event
-	if [ -n "$old" ] && grep -q lipc-wait-event "/proc/$old/cmdline" 2>/dev/null; then kill "$old" 2>/dev/null; fi
-	rm -f "$STATE/power.fifo"
-	if ! have lipc-wait-event || ! mkfifo "$STATE/power.fifo" 2>/dev/null; then
-		log "power button exit unavailable"; return
-	fi
-	lipc-wait-event -m com.lab126.powerd goingToScreenSaver > "$STATE/power.fifo" 2>/dev/null &
-	echo $! > "$STATE/watch.pid"
+	kill_watcher
+	if ! have lipc-wait-event; then log "power button exit unavailable"; return; fi
 	(
-		read -r _ < "$STATE/power.fifo" || exit 0
-		log "power button pressed: exiting to the Kindle UI"
-		lipc-set-prop com.lab126.powerd preventScreenSaver 0 >> "$LOG" 2>&1
-		lipc-set-prop com.lab126.cmd wirelessEnable 1 >> "$LOG" 2>&1   # in case a Wi-Fi restart was mid-way
-		kill "$MAIN_PID" 2>/dev/null
-		sleep 1
-		rm -f "$STATE/pid"
-		kill "$(cat "$STATE/watch.pid")" 2>/dev/null
-		rotate_log
-		start lab126_gui >> "$LOG" 2>&1
+		restarts=0
+		while :; do
+			rm -f "$STATE/power.fifo"
+			mkfifo "$STATE/power.fifo" 2>/dev/null || { log "power button exit unavailable (mkfifo)"; exit 0; }
+			lipc-wait-event -m com.lab126.powerd goingToScreenSaver > "$STATE/power.fifo" 2>/dev/null &
+			echo $! > "$STATE/watch.pid"
+			if read -r _ < "$STATE/power.fifo"; then
+				log "power button pressed: exiting to the Kindle UI"
+				kill "$(cat "$STATE/watch.pid")" 2>/dev/null
+				kill "$MAIN_PID" 2>/dev/null
+				i=0   # the loop may be inside a 30 s curl; let it finish before the UI redraws the screen
+				while kill -0 "$MAIN_PID" 2>/dev/null && [ $i -lt 60 ]; do sleep 1; i=$((i + 1)); done
+				kill -9 "$MAIN_PID" 2>/dev/null
+				restore_ui
+				exit 0
+			fi
+			# EOF: lipc-wait-event died. Re-arm unless the main loop is gone too.
+			kill -0 "$MAIN_PID" 2>/dev/null || exit 0
+			restarts=$((restarts + 1))
+			[ $restarts -le 30 ] || { log "power watcher gave up after 30 restarts"; exit 0; }
+			log "power watcher restarted ($restarts)"
+			sleep 2
+		done
 	) &
 }
 
@@ -318,6 +354,13 @@ shown_banner=-
 redraw=full
 
 while :; do
+	if [ -f "$DIR/stop" ]; then   # second exit path, for when the power button can't be used
+		rm -f "$DIR/stop"
+		log "stop file found: exiting to the Kindle UI"
+		kill_watcher
+		restore_ui
+		exit 0
+	fi
 	now=$(date -u +%s)
 	central_offset "$now"
 	if [ $((now - batt_checked)) -ge 300 ] || [ $((now - batt_checked)) -lt 0 ]; then

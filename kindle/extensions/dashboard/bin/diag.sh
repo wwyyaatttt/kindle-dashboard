@@ -30,7 +30,7 @@ cmp /tmp/diag.plain /tmp/diag.dec && echo "aes-256-cbc -md sha256 round trip: ok
 rm -f /tmp/diag.plain /tmp/diag.key /tmp/diag.enc /tmp/diag.dec
 section "dd"
 dd if=/dev/zero of=/tmp/diag.dd bs=768 count=2 2>&1 | tail -1
-dd if=/dev/zero of=/tmp/diag.dd bs=768 count=1 seek=1 conv=notrunc 2>&1 | tail -1; echo "conv=notrunc exit: $?"
+dd if=/dev/zero of=/tmp/diag.dd bs=768 count=1 seek=1 conv=notrunc >/tmp/diag.ddout 2>&1; echo "conv=notrunc exit: $?"; tail -1 /tmp/diag.ddout; rm -f /tmp/diag.ddout
 rm -f /tmp/diag.dd
 section "date parsing"
 date -u -d "2026-10-24 22:43:30" +%s 2>&1 | head -1

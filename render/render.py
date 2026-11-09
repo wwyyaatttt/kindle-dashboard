@@ -170,6 +170,15 @@ class Hour:
 
 
 @dataclass
+class Day:
+    label: str           # weekday abbreviation, e.g. "Mon"
+    icon: str
+    high: int | None
+    low: int | None
+    pop: int
+
+
+@dataclass
 class Weather:
     temp: int
     condition: str
@@ -178,6 +187,7 @@ class Weather:
     low: int | None
     night: bool          # first daily period is a night: show its low first, then the next day's high
     hours: list[Hour]
+    tomorrow: Day | None = None
 
 
 def fetch_weather(now: datetime) -> Weather:
@@ -196,12 +206,12 @@ def fetch_weather(now: datetime) -> Weather:
         if end <= now or p.get("temperature") is None:
             continue
         mid = at + (end - at) / 2
-        hours.append(Hour(at, p["temperature"], icon_for(p["shortForecast"], is_day(mid)),
+        hours.append(Hour(at, p["temperature"], icon_for(p.get("shortForecast") or "", is_day(mid)),
                           (p.get("probabilityOfPrecipitation") or {}).get("value") or 0))
     if not hours:
         raise ValueError("hourly forecast has no current periods")
     current = next(p for p in hourly if datetime.fromisoformat(p["endTime"]) > now)
-    temp, condition = hours[0].temp, current["shortForecast"]
+    temp, condition = hours[0].temp, current.get("shortForecast") or "Cloudy"
 
     # Prefer the live observation from the nearest station when it's fresh.
     try:
@@ -214,10 +224,24 @@ def fetch_weather(now: datetime) -> Weather:
     except (requests.RequestException, KeyError, TypeError, ValueError):
         pass
 
-    night = bool(daily) and not daily[0]["isDaytime"]
-    high = next((p["temperature"] for p in daily if p["isDaytime"]), None)
-    low = next((p["temperature"] for p in daily if not p["isDaytime"]), None)
-    return Weather(temp, condition, icon_for(condition, is_day(now)), high, low, night, hours)
+    # Daily periods are optional extras; a malformed one must not take the card down.
+    night, high, low, tomorrow = False, None, None, None
+    try:
+        days = [p for p in daily if p.get("isDaytime", True)]
+        nights = [p for p in daily if not p.get("isDaytime", True)]
+        night = bool(daily) and not daily[0].get("isDaytime", True)
+        high = days[0].get("temperature") if days else None
+        low = nights[0].get("temperature") if nights else None
+        tm = now.date() + timedelta(days=1)
+        day_p = next((p for p in days if datetime.fromisoformat(p["startTime"]).astimezone(TZ).date() == tm), None)
+        if day_p:
+            night_p = next((p for p in nights if datetime.fromisoformat(p["startTime"]).astimezone(TZ).date() == tm), None)
+            tomorrow = Day(tm.strftime("%a"), icon_for(day_p.get("shortForecast") or "", True),
+                           day_p.get("temperature"), night_p.get("temperature") if night_p else None,
+                           (day_p.get("probabilityOfPrecipitation") or {}).get("value") or 0)
+    except (KeyError, TypeError, ValueError) as e:
+        print(f"daily forecast unusable: {type(e).__name__}", file=sys.stderr)
+    return Weather(temp, condition, icon_for(condition, is_day(now)), high, low, night, hours, tomorrow)
 
 
 @dataclass
@@ -369,7 +393,7 @@ MOON_NAMES = ((1, "New Moon"), (6, "Waxing Crescent"), (8, "First Quarter"), (13
 def moon_phase(day: date) -> tuple[float, str]:
     """Returns (fraction of the lunation 0..1, name). astral's phase runs 0..28 (0 new, 14 full)."""
     days = moon.phase(day)
-    name = next(n for limit, n in MOON_NAMES if days < limit)
+    name = next((n for limit, n in MOON_NAMES if days < limit), "New Moon")
     return days / 28, name
 
 
@@ -434,9 +458,11 @@ def draw_weather(img, d, wx: Weather | None, now: datetime, top: int, bottom: in
 
     # Every two hours of elapsed time, not by clock hour, so the DST fall-back night has no repeats.
     first = wx.hours[0].at
+    hourly_slots = 5 if wx.tomorrow else 6
     picks = [wx.hours[0]] + [h for h in wx.hours[1:]
-                             if round((h.at.timestamp() - first.timestamp()) / 3600) % 2 == 0][:5]
-    col = (R - L) / len(picks)
+                             if round((h.at.timestamp() - first.timestamp()) / 3600) % 2 == 0][:hourly_slots - 1]
+    slots = len(picks) + (1 if wx.tomorrow else 0)
+    col = (R - L) / slots
     for i, h in enumerate(picks):
         cx = int(L + col * i + col / 2)
         label, icon, temp = ("Now", wx.icon, wx.temp) if i == 0 else (fmt_hour(h.at), h.icon, h.temp)
@@ -445,6 +471,23 @@ def draw_weather(img, d, wx: Weather | None, now: datetime, top: int, bottom: in
         if h.pop >= 10:
             d.text((cx, line_y + 82), f"{h.pop}%", font=F["pop"], fill=WX_MUTED, anchor="ma")
         d.text((cx, line_y + 102), f"{temp}°", font=F["hour_t"], fill=INK, anchor="ma")
+
+    if wx.tomorrow:   # last slot: tomorrow's daytime forecast, high over low
+        t = wx.tomorrow
+        cx = int(L + col * (slots - 1) + col / 2)
+        d.line((cx - col // 2, line_y + 16, cx - col // 2, line_y + 128), fill=HAIRLINE, width=2)
+        d.text((cx, line_y + 14), t.label, font=F["hour"], fill=WX_MUTED, anchor="ma")
+        draw_icon(d, t.icon, cx, line_y + 42, 38, anchor="ma")
+        if t.pop >= 10:
+            d.text((cx, line_y + 82), f"{t.pop}%", font=F["pop"], fill=WX_MUTED, anchor="ma")
+        hi = f"{t.high}°" if t.high is not None else "–"
+        lo = f"{t.low}°" if t.low is not None else ""
+        hi_w = text_w(d, hi, F["hour_t"])
+        lo_w = text_w(d, lo, F["hour"]) if lo else 0
+        x = cx - (hi_w + (lo_w + 6 if lo else 0)) // 2
+        d.text((x, line_y + 102), hi, font=F["hour_t"], fill=INK)
+        if lo:
+            d.text((x + hi_w + 6, line_y + 107), lo, font=F["hour"], fill=WX_MUTED)
 
 
 def day_rows(day_events: list[Event], now: datetime, today: bool) -> list[tuple[str, str]]:
